@@ -1,4 +1,4 @@
-# icka-multi (Python IRCCloud keep-alive)
+# icka-multi (Python "icka" keep-alive)
 # forked from https://github.com/osm/icka
 # shoutout to Oscar Linderholm/OSM
 
