@@ -1,0 +1,10 @@
+# Python stuff
+__pycache__/
+*.pyc
+
+# Local config / secrets
+.env
+accounts.txt
+
+# Logs
+*.log

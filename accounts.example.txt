@@ -1,0 +1,5 @@
+# Example accounts file
+# One account per line: email:password
+
+example1@example.com:changeme1
+example2@example.com:changeme2
