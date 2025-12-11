@@ -31,11 +31,11 @@ cp accounts.example.txt accounts.txt
 
 Test:
 
-python3 ./icka_keepalive.py
+python3 ./icka.py
 
 Cron example
 
 Run every hour:
 
-0 * * * * cd /home/youruser/icka && /usr/bin/python3 ./icka_keepalive.py >> icka_keepalive.log 2>&1
+0 * * * * /home/user/icka/run-icka.sh >/dev/null 2>&1
 
