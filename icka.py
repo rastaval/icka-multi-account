@@ -1,16 +1,19 @@
 #!/usr/bin/env python3
 """
-icka_keepalive.py
+icka.py
 
-Python port of the Go "icka" IRCCloud keep-alive tool,
-with support for multiple accounts and .env configuration.
+Python port of the Go "icka" keep-alive tool,
+with support for multiple accounts and .env configuration,
+PLUS batched logins to avoid hitting rate limits.
 
 Config priority:
 1) CLI flags
 2) Environment variables (ICKA_*)
 3) .env file in same directory (also ICKA_*)
 
-.env example is shown below.
+New env knobs:
+- ICKA_BATCH_SIZE            (default 5)
+- ICKA_BATCH_SLEEP_SECONDS   (default 300)
 """
 
 import argparse
@@ -33,7 +36,7 @@ ENV_PREFIX = "ICKA_"
 
 
 # ---------------------------------------------------------------------
-# Tiny .env loader
+# Tiny .env + env helpers
 # ---------------------------------------------------------------------
 
 
@@ -73,14 +76,27 @@ def env_bool(key: str, default: bool = False) -> bool:
     return val.strip().lower() in ("1", "true", "yes", "on")
 
 
+def env_int(key: str, default: int) -> int:
+    val = env_get(key)
+    if val is None:
+        return default
+    try:
+        return int(val.strip())
+    except ValueError:
+        return default
+
+
 # ---------------------------------------------------------------------
 # HTTP + WebSocket helpers
 # ---------------------------------------------------------------------
 
 
-def http_request(method: str, url: str,
-                 form: Optional[dict] = None,
-                 headers: Optional[dict] = None) -> bytes:
+def http_request(
+    method: str,
+    url: str,
+    form: Optional[dict] = None,
+    headers: Optional[dict] = None,
+) -> bytes:
     if headers is None:
         headers = {}
 
@@ -98,12 +114,14 @@ def ws_client(host: str, path: str, user_agent: str) -> websocket.WebSocket:
         "User-Agent": user_agent,
     }
     url = f"wss://{host}{path}"
-    ws = websocket.create_connection(url, header=[f"{k}: {v}" for k, v in headers.items()])
+    ws = websocket.create_connection(
+        url, header=[f"{k}: {v}" for k, v in headers.items()]
+    )
     return ws
 
 
 # ---------------------------------------------------------------------
-# IRCCloud auth flows
+# :D auth flows
 # ---------------------------------------------------------------------
 
 
@@ -138,10 +156,9 @@ def get_session(email: str, password: str, token: str, user_agent: str) -> dict:
     return r  # expects SessionResponse-like dict
 
 
-def auth_websocket(session_cookie: str,
-                   host: str,
-                   path: str,
-                   user_agent: str) -> bool:
+def auth_websocket(
+    session_cookie: str, host: str, path: str, user_agent: str
+) -> bool:
     ws = ws_client(host, path, user_agent)
     try:
         auth_req = {
@@ -198,9 +215,11 @@ def keep_alive(email: str, password: str, user_agent: str) -> None:
 # ---------------------------------------------------------------------
 
 
-def load_accounts(accounts_file: Optional[str],
-                  email: Optional[str],
-                  password: Optional[str]) -> List[Tuple[str, str]]:
+def load_accounts(
+    accounts_file: Optional[str],
+    email: Optional[str],
+    password: Optional[str],
+) -> List[Tuple[str, str]]:
     accounts: List[Tuple[str, str]] = []
 
     if accounts_file:
@@ -218,7 +237,8 @@ def load_accounts(accounts_file: Optional[str],
                     em, pw = line.split(",", 1)
                 else:
                     raise SystemExit(
-                        f"invalid line in accounts file (expected email:password): {line}"
+                        "invalid line in accounts file "
+                        f"(expected email:password): {line}"
                     )
                 accounts.append((em.strip(), pw.strip()))
     elif email and password:
@@ -259,12 +279,80 @@ def parse_duration_to_seconds(s: str) -> float:
     return total
 
 
+# ---------------------------------------------------------------------
+# Batched processing to avoid 429
+# ---------------------------------------------------------------------
+
+
+def run_accounts_batched(
+    accounts: List[Tuple[str, str]],
+    user_agent: str,
+    batch_size: int,
+    batch_sleep_seconds: int,
+) -> None:
+    log = logging.getLogger("icka")
+
+    total = len(accounts)
+    if total == 0:
+        return
+
+    if batch_size <= 0:
+        batch_size = total
+
+    log.info(
+        "Starting batched processing: %d accounts, batch_size=%d, batch_sleep=%ds",
+        total,
+        batch_size,
+        batch_sleep_seconds,
+    )
+
+    batch_index = 0
+    for i in range(0, total, batch_size):
+        batch_index += 1
+        batch = accounts[i : i + batch_size]
+        start_idx = i + 1
+        end_idx = i + len(batch)
+
+        log.info(
+            "Batch %d: accounts %d–%d of %d (size=%d)",
+            batch_index,
+            start_idx,
+            end_idx,
+            total,
+            len(batch),
+        )
+
+        for em, pw in batch:
+            try:
+                keep_alive(em, pw, user_agent)
+            except Exception as e:
+                log.error("(%s) keep-alive error: %s", em, e)
+
+        # Sleep before next batch, but not after the last
+        if end_idx < total and batch_sleep_seconds > 0:
+            log.info(
+                "Batch %d done (%d/%d). Sleeping %d seconds before next batch…",
+                batch_index,
+                end_idx,
+                total,
+                batch_sleep_seconds,
+            )
+            time.sleep(batch_sleep_seconds)
+
+    log.info("All batches completed (%d accounts).", total)
+
+
+# ---------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------
+
+
 def main() -> None:
     # 1) Load .env first so os.environ is ready
     load_dotenv(".env")
 
     parser = argparse.ArgumentParser(
-        description="IRCCloud keep-alive (Python, multi-account, .env-aware)"
+        description="IRCCloud keep-alive (Python, multi-account, .env-aware, batched)"
     )
     parser.add_argument("--email", help="IRCCloud email (single-account mode)")
     parser.add_argument("--password", help="IRCCloud password (single-account mode)")
@@ -290,6 +378,21 @@ def main() -> None:
         default=env_get("LOG_LEVEL", "INFO"),
         help="Logging level (DEBUG, INFO, WARNING, ERROR)",
     )
+    parser.add_argument(
+        "--batch-size",
+        type=int,
+        default=env_int("BATCH_SIZE", 5),
+        help="Max accounts per batch (default from ICKA_BATCH_SIZE or 5)",
+    )
+    parser.add_argument(
+        "--batch-sleep-seconds",
+        type=int,
+        default=env_int("BATCH_SLEEP_SECONDS", 300),
+        help=(
+            "Sleep in seconds between batches "
+            "(default from ICKA_BATCH_SLEEP_SECONDS or 300)"
+        ),
+    )
 
     args = parser.parse_args()
 
@@ -309,13 +412,18 @@ def main() -> None:
     accounts = load_accounts(accounts_file, email, password)
     user_agent = args.user_agent
 
+    log = logging.getLogger("icka")
+    if accounts_file:
+        log.info("Counted %d accounts total from %s", len(accounts), accounts_file)
+    else:
+        log.info("Counted %d account(s) total (single-account mode)", len(accounts))
+
+    batch_size = args.batch_size
+    batch_sleep_seconds = args.batch_sleep_seconds
+
     if not args.forever:
         # One-shot mode (ideal for cron)
-        for em, pw in accounts:
-            try:
-                keep_alive(em, pw, user_agent)
-            except Exception as e:
-                logging.error("(%s) keep-alive error: %s", em, e)
+        run_accounts_batched(accounts, user_agent, batch_size, batch_sleep_seconds)
         return
 
     # Forever mode
@@ -325,17 +433,13 @@ def main() -> None:
         raise SystemExit(f"unable to parse --sleep-interval: {e}")
 
     logging.info(
-        "Running in --forever mode, sleep interval = %s (%ss)",
+        "Running in --forever mode, iteration sleep = %s (%ss)",
         args.sleep_interval,
         sleep_seconds,
     )
 
     while True:
-        for em, pw in accounts:
-            try:
-                keep_alive(em, pw, user_agent)
-            except Exception as e:
-                logging.error("(%s) keep-alive error: %s", em, e)
+        run_accounts_batched(accounts, user_agent, batch_size, batch_sleep_seconds)
         logging.info("Iteration complete, sleeping %.1f seconds…", sleep_seconds)
         time.sleep(sleep_seconds)
 
