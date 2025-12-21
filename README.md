@@ -1,13 +1,13 @@
 # icka-multi (Python "icka" keep-alive)
-# forked from https://github.com/osm/icka
-# shoutout to Oscar Linderholm/OSM
+derived from https://github.com/osm/icka
+shoutout to Oscar Linderholm/OSM
 
-Python port of the Go "icka" IRCCloud keep-alive tool, with multi-account support
+Python port of the Go "icka" ic keep-alive tool, with multi-account support
 and simple .env configuration.
 
 ## Features
 
-- Logs into IRCCloud using the official web endpoints
+- Logs into IC using the official web endpoints
 - Supports:
   - single account (EMAIL/PASSWORD)
   - multiple accounts via `accounts.txt`
